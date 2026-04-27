@@ -26,8 +26,8 @@ AI_FILE = "big5_merged_80000.csv"
 HUMAN_HF_DATASET = "Cecilia-lll/IPIP-BFFM-openpsy"
 HUMAN_HF_FILE = "data-cleaned.csv"
 
-OUT_DIR = Path("outputs")
-OUT_DIR.mkdir(exist_ok=True)
+OUTDIR = Path("outputs")
+OUTDIR.mkdir(exist_ok=True)
 
 # Number of points sampled per group (humans, and per AI model) for the scatter.
 # 2000 x 9 groups = ~18k points total. Balanced so humans don't swamp the plot.
@@ -153,6 +153,33 @@ for g in CLASS_ORDER:
     print(g, COLORS[g])
 
 # %% [markdown]
+# ## Group means in the original 50-dim space, then projected onto PCA plane.
+#
+# PCA is linear, so the projection of a 50-dim group mean equals the mean of
+# that group's PC scores (modulo the global centering done by PCA, which is
+# constant across groups). We compute it from the 50-dim vectors explicitly so
+# we can also report the pairwise distances between group means in the
+# original 50-dim space — that is what makes "AI mean ≈ Human mean" concrete.
+
+# %%
+group_means_50d = (
+    data.groupby("group")[ITEM_COLS].mean().reindex(CLASS_ORDER).dropna(how="all")
+)
+
+means_centered = group_means_50d.to_numpy() - X.mean(axis=0, keepdims=True)
+means_scaled   = means_centered / StandardScaler().fit(X).scale_
+means_pc       = pca.transform(means_scaled)
+group_means_pc = pd.DataFrame(
+    means_pc, index=group_means_50d.index, columns=["PC1", "PC2"]
+)
+
+human_mean_50d = group_means_50d.loc["Human"].to_numpy()
+print("L2 distance (50-dim) from each group mean to Human mean:")
+for g, vec in group_means_50d.iterrows():
+    d = float(np.linalg.norm(vec.to_numpy() - human_mean_50d))
+    print(f"  {g:35s} {d:.4f}")
+
+# %% [markdown]
 # ## Plot
 
 # %%
@@ -172,6 +199,25 @@ for g in draw_order:
         linewidths=0, rasterized=True,
     )
 
+# Overlay group mean vectors on top of the cloud.
+# Star marker with a black edge so it pops on any color.
+for g in draw_order:
+    if g not in group_means_pc.index:
+        continue
+    mx, my = group_means_pc.loc[g, "PC1"], group_means_pc.loc[g, "PC2"]
+    ax.scatter(
+        mx, my,
+        marker="*", s=420,
+        c=[COLORS[g]], edgecolors="black", linewidths=1.4,
+        zorder=10,
+    )
+
+# One legend entry that explains the star marker.
+ax.scatter(
+    [], [], marker="*", s=220, c="white", edgecolors="black",
+    linewidths=1.2, label="Group mean (50-dim → PCA)",
+)
+
 ax.set_xlabel(f"PC1 ({evr[0]*100:.1f}% var)")
 ax.set_ylabel(f"PC2 ({evr[1]*100:.1f}% var)")
 ax.set_title(f"PCA of Big Five item responses (50-dim) — {N_PER_GROUP} per group")
@@ -184,7 +230,7 @@ for lh in leg.legend_handles:
     lh.set_alpha(1.0)
 
 plt.tight_layout()
-out_path = OUT_DIR / f"pca_responses_{N_PER_GROUP}per_group.png"
+out_path = OUTDIR / f"pca_responses_{N_PER_GROUP}per_group.png"
 plt.savefig(out_path, bbox_inches="tight", dpi=150)
 print("Saved:", out_path)
 plt.show()
@@ -196,6 +242,13 @@ plt.show()
 # %%
 families = ["Claude", "OpenAI", "Gemini", "DeepSeek"]
 fig, axes = plt.subplots(2, 2, figsize=(14, 11), dpi=120, sharex=True, sharey=True)
+def _plot_mean(ax, g):
+    if g not in group_means_pc.index:
+        return
+    mx, my = group_means_pc.loc[g, "PC1"], group_means_pc.loc[g, "PC2"]
+    ax.scatter(mx, my, marker="*", s=320,
+               c=[COLORS[g]], edgecolors="black", linewidths=1.2, zorder=10)
+
 for ax, fam in zip(axes.flat, families):
     h = data.loc[data["group"] == "Human"]
     ax.scatter(h["PC1"], h["PC2"], s=6, alpha=0.25, c=[COLORS["Human"]],
@@ -205,6 +258,11 @@ for ax, fam in zip(axes.flat, families):
         sub = data.loc[data["group"] == m]
         ax.scatter(sub["PC1"], sub["PC2"], s=8, alpha=0.5, c=[COLORS[m]],
                    label=m, linewidths=0, rasterized=True)
+
+    _plot_mean(ax, "Human")
+    for m in fam_models:
+        _plot_mean(ax, m)
+
     ax.set_title(fam)
     ax.set_xlabel(f"PC1 ({evr[0]*100:.1f}%)")
     ax.set_ylabel(f"PC2 ({evr[1]*100:.1f}%)")
@@ -214,7 +272,7 @@ for ax, fam in zip(axes.flat, families):
 
 plt.suptitle(f"PCA of Big Five responses — humans vs each family ({N_PER_GROUP}/group)")
 plt.tight_layout()
-out_path2 = OUT_DIR / f"pca_responses_facets_{N_PER_GROUP}per_group.png"
+out_path2 = OUTDIR / f"pca_responses_facets_{N_PER_GROUP}per_group.png"
 plt.savefig(out_path2, bbox_inches="tight", dpi=150)
 print("Saved:", out_path2)
 plt.show()
@@ -224,6 +282,18 @@ plt.show()
 
 # %%
 data[["group", "family", "PC1", "PC2"]].to_csv(
-    OUT_DIR / f"pca_scores_{N_PER_GROUP}per_group.csv", index=False,
+    OUTDIR / f"pca_scores_{N_PER_GROUP}per_group.csv", index=False,
 )
 print("Saved PCA scores CSV.")
+
+means_out = group_means_pc.copy()
+means_out["dist_to_human_50d"] = [
+    float(np.linalg.norm(group_means_50d.loc[g].to_numpy() - human_mean_50d))
+    for g in means_out.index
+]
+means_out.to_csv(OUTDIR / f"pca_group_means_{N_PER_GROUP}per_group.csv")
+print("Saved group means CSV.")
+
+# %% [markdown]
+# # Level 1 — Central tendency fidelity
+# Result: `outputs/level1_central_tendency_model_vs_human.csv`
